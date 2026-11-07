@@ -20,11 +20,8 @@ app.add_middleware(
 # --- Configuration ---
 HF_TOKEN = os.getenv("hf_token") 
 
-# DuckDB uses the hf://buckets/ protocol for Bucket support
-BUCKET_ID = "crozzx/avezkibuckett"
-
-# EXACT FILE PATH: Pointing directly to idx_phone.1.parquet
-FILE_PATH = f"hf://buckets/{BUCKET_ID}/idx_phone.1.parquet"
+# Direct Resolve URL for the specific file
+FILE_URL = "https://huggingface.co/buckets/crozzx/avezkibuckett/resolve/main/idx_phone.1.parquet"
 
 @app.get("/")
 def root():
@@ -43,23 +40,27 @@ def search(mobile: str = Query(..., description="10-digit mobile number")):
 
         con = duckdb.connect(database=':memory:')
         
-        # Set writable home dir for extension install
         con.execute("SET home_directory='/tmp';")
         
-        # Load httpfs for hf:// protocol support
+        # INSTALL and LOAD httpfs to handle HTTPS URLs
         con.execute("INSTALL httpfs;")
         con.execute("LOAD httpfs;")
         
-        # Authenticate for private bucket access
+        # Authenticate the request to Hugging Face using HTTP headers
         if HF_TOKEN:
-            con.execute(f"CREATE SECRET hf_token (TYPE huggingface, TOKEN '{HF_TOKEN}');")
+            con.execute(f"""
+                CREATE SECRET hf_secret (
+                    TYPE HTTP,
+                    EXTRA_HTTP_HEADERS MAP {{'Authorization': 'Bearer {HF_TOKEN}'}}
+                );
+            """)
         
-        # Query ONLY the specific file
+        # Query the exact URL
         query = f"""
             SELECT name, fathersName AS father_name, phoneNumber AS mobile, 
                    aadharNumber AS aadhar_number, otherNumber AS alternate_mobile, 
                    address
-            FROM read_parquet('{FILE_PATH}')
+            FROM read_parquet('{FILE_URL}')
             WHERE phoneNumber = ?
             LIMIT 10
         """
