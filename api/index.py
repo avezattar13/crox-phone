@@ -20,8 +20,8 @@ app.add_middleware(
 # --- Configuration ---
 HF_TOKEN = os.getenv("hf_token") 
 
-# Direct Resolve URL for the specific file
-FILE_URL = "https://huggingface.co/buckets/crozzx/avezkibuckett/resolve/main/idx_phone.1.parquet"
+# FIXED URL: Use /raw/main/ instead of /resolve/main/ for Hugging Face Buckets
+FILE_URL = "https://huggingface.co/buckets/crozzx/avezkibuckett/raw/main/idx_phone.1.parquet"
 
 @app.get("/")
 def root():
@@ -42,11 +42,11 @@ def search(mobile: str = Query(..., description="10-digit mobile number")):
         
         con.execute("SET home_directory='/tmp';")
         
-        # INSTALL and LOAD httpfs to handle HTTPS URLs
+        # Load httpfs for HTTP(S) support
         con.execute("INSTALL httpfs;")
         con.execute("LOAD httpfs;")
         
-        # Authenticate the request to Hugging Face using HTTP headers
+        # Authenticate using HTTP Headers
         if HF_TOKEN:
             con.execute(f"""
                 CREATE SECRET hf_secret (
@@ -55,7 +55,7 @@ def search(mobile: str = Query(..., description="10-digit mobile number")):
                 );
             """)
         
-        # Query the exact URL
+        # Query the specific file URL
         query = f"""
             SELECT name, fathersName AS father_name, phoneNumber AS mobile, 
                    aadharNumber AS aadhar_number, otherNumber AS alternate_mobile, 
