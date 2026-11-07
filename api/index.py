@@ -1,9 +1,7 @@
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-import pyarrow.dataset as ds
-import pyarrow.compute as pc
-from huggingface_hub import HfFileSystem
+import duckdb
 import os
 import time
 import json
@@ -22,12 +20,8 @@ app.add_middleware(
 # --- Configuration ---
 HF_TOKEN = os.getenv("hf_token") 
 
-# Initialize HfFileSystem
-global_fs = HfFileSystem(token=HF_TOKEN)
-
-# EXACT PATH using HfFileSystem bucket syntax
-BUCKET_ID = "crozzx/avezkibuckett"
-FILE_PATH = f"buckets/{BUCKET_ID}/idx_phone.1.parquet"
+# DuckDB native Bucket path syntax
+BUCKET_PATH = "hf://buckets/crozzx/avezkibuckett/idx_phone.1.parquet"
 
 @app.get("/")
 def root():
@@ -44,56 +38,56 @@ def search(mobile: str = Query(..., description="10-digit mobile number")):
                 media_type="application/json"
             )
 
-        # Load the single file directly
-        dataset = ds.dataset(FILE_PATH, filesystem=global_fs, format="parquet")
+        con = duckdb.connect(database=':memory:')
         
-        # Filter for the phone number
-        filter_expr = pc.equal(pc.field("phoneNumber"), mobile)
+        # Set writable home for extension installation
+        con.execute("SET home_directory='/tmp';")
         
-        # Only read necessary columns to save RAM
-        columns_to_read = ["name", "fathersName", "phoneNumber", "aadharNumber", "otherNumber", "address"]
+        # INSTALL and LOAD httpfs (required for hf:// paths)
+        con.execute("INSTALL httpfs;")
+        con.execute("LOAD httpfs;")
         
-        # Iterate in batches to prevent OOM just in case
-        scanner = dataset.scanner(
-            filter=filter_expr,
-            columns=columns_to_read,
-            use_threads=False,
-            batch_size=1024
-        )
+        # Authenticate using DuckDB's HuggingFace secret type
+        if HF_TOKEN:
+            con.execute(f"CREATE SECRET hf_token (TYPE huggingface, TOKEN '{HF_TOKEN}');")
         
-        raw_records = []
-        for batch in scanner.to_batches():
-            if batch.num_rows > 0:
-                raw_records = batch.to_pylist()
-                break # Stop reading once found
-                
+        # Query the exact bucket file
+        query = f"""
+            SELECT name, fathersName AS father_name, phoneNumber AS mobile, 
+                   aadharNumber AS aadhar_number, otherNumber AS alternate_mobile, 
+                   address
+            FROM read_parquet('{BUCKET_PATH}')
+            WHERE phoneNumber = ?
+            LIMIT 10
+        """
+        
+        result = con.execute(query, [mobile]).fetchall()
+        columns = [desc[0] for desc in con.description]
+        
+        con.close()
+        
         elapsed = time.time() - start_time
         
         response_data = {
             "meta": {
                 "credits": "Made by Mr. Anonymous",
                 "search_query": mobile,
-                "total_records": len(raw_records),
+                "total_records": len(result),
                 "execution_time": f"{elapsed:.3f}s"
             },
             "results": []
         }
 
-        if not raw_records:
+        if not result:
             response_data["message"] = "No record found in the database."
             return Response(
                 content=json.dumps(response_data, indent=4), 
                 media_type="application/json"
             )
             
-        for i, row in enumerate(raw_records, 1):
-            clean_row = {}
-            if row.get("name"): clean_row["name"] = row["name"]
-            if row.get("fathersName"): clean_row["father_name"] = row["fathersName"]
-            if row.get("phoneNumber"): clean_row["mobile"] = row["phoneNumber"]
-            if row.get("aadharNumber"): clean_row["aadhar_number"] = row["aadharNumber"]
-            if row.get("otherNumber"): clean_row["alternate_mobile"] = row["otherNumber"]
-            if row.get("address"): clean_row["address"] = row["address"]
+        for i, row in enumerate(result, 1):
+            raw_row = dict(zip(columns, row))
+            clean_row = {k: v for k, v in raw_row.items() if v is not None and v != ""}
             
             clean_row["result_id"] = i
             response_data["results"].append(clean_row)
