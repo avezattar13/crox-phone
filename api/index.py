@@ -1,9 +1,7 @@
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-import pyarrow.dataset as ds
-import pyarrow.compute as pc
-from huggingface_hub import HfFileSystem
+import duckdb
 import os
 import time
 import json
@@ -20,15 +18,12 @@ app.add_middleware(
 )
 
 # --- Configuration ---
-REPO_ID = "crozzx/Avezkadata" 
 HF_TOKEN = os.getenv("hf_token") 
 
-global_fs = HfFileSystem(token=HF_TOKEN)
-
-# --- File Selection ---
-# Using glob to target exactly the files shown in the screenshot.
-# This grabs all parts for idx_phone.0, idx_phone.1, and idx_phone.2
-FILE_LIST = global_fs.glob(f"datasets/{REPO_ID}/idx_phone.*_part*.parquet")
+# Direct URL for the Hugging Face Dataset
+# DuckDB's httpfs will use HTTP Range requests to read only the needed rows
+BASE_URL = "https://huggingface.co/datasets/crozzx/Avezkadata/resolve/main"
+FILE_LIST = [f"{BASE_URL}/idx_phone.{i}_part0{j}.parquet" for i in range(3) for j in range(1, 7)]
 
 @app.get("/")
 def root():
@@ -45,63 +40,63 @@ def search(mobile: str = Query(..., description="10-digit mobile number")):
                 media_type="application/json"
             )
 
-        if not FILE_LIST:
-            return Response(
-                content=json.dumps({"error": "Dataset files not found."}, indent=4), 
-                media_type="application/json"
-            )
-
-        # Load the dataset from the targeted files
-        dataset = ds.dataset(FILE_LIST, filesystem=global_fs, format="parquet")
+        con = duckdb.connect(database=':memory:')
         
-        # Filter for the phone number
-        filter_expr = pc.equal(pc.field("phoneNumber"), mobile)
+        # Set writable home dir for extension install
+        con.execute("SET home_directory='/tmp';")
         
-        # Only read necessary columns to save memory
-        columns_to_read = ["name", "fathersName", "phoneNumber", "aadharNumber", "otherNumber", "address"]
+        # Load httpfs for HTTP support
+        con.execute("INSTALL httpfs;")
+        con.execute("LOAD httpfs;")
         
-        # Scan with batch_size to prevent Vercel OOM on the 2 GB files
-        scanner = dataset.scanner(
-            filter=filter_expr,
-            columns=columns_to_read,
-            use_threads=False,
-            batch_size=1024
-        )
+        # Authenticate using HTTP Headers (for private repos)
+        if HF_TOKEN:
+            con.execute(f"""
+                CREATE SECRET hf_secret (
+                    TYPE HTTP,
+                    EXTRA_HTTP_HEADERS MAP {{'Authorization': 'Bearer {HF_TOKEN}'}}
+                );
+            """)
         
-        raw_records = []
-        # Break as soon as a match is found
-        for batch in scanner.to_batches():
-            if batch.num_rows > 0:
-                raw_records = batch.to_pylist()
-                break
-                
+        # The query uses DuckDB's read_parquet. 
+        # DuckDB streams over HTTP and only reads what is needed.
+        query = f"""
+            SELECT name, fathersName AS father_name, phoneNumber AS mobile, 
+                   aadharNumber AS aadhar_number, otherNumber AS alternate_mobile, 
+                   address
+            FROM read_parquet({FILE_LIST})
+            WHERE phoneNumber = ?
+            LIMIT 10
+        """
+        
+        result = con.execute(query, [mobile]).fetchall()
+        columns = [desc[0] for desc in con.description]
+        
+        con.close()
+        
         elapsed = time.time() - start_time
         
         response_data = {
             "meta": {
                 "credits": "Made by Mr. Anonymous",
                 "search_query": mobile,
-                "total_records": len(raw_records),
+                "total_records": len(result),
                 "execution_time": f"{elapsed:.3f}s"
             },
             "results": []
         }
 
-        if not raw_records:
+        if not result:
             response_data["message"] = "No record found in the database."
             return Response(
                 content=json.dumps(response_data, indent=4), 
                 media_type="application/json"
             )
             
-        for i, row in enumerate(raw_records, 1):
-            clean_row = {}
-            if row.get("name"): clean_row["name"] = row["name"]
-            if row.get("fathersName"): clean_row["father_name"] = row["fathersName"]
-            if row.get("phoneNumber"): clean_row["mobile"] = row["phoneNumber"]
-            if row.get("aadharNumber"): clean_row["aadhar_number"] = row["aadharNumber"]
-            if row.get("otherNumber"): clean_row["alternate_mobile"] = row["otherNumber"]
-            if row.get("address"): clean_row["address"] = row["address"]
+        for i, row in enumerate(result, 1):
+            raw_row = dict(zip(columns, row))
+            # Remove empty/null values to keep response clean
+            clean_row = {k: v for k, v in raw_row.items() if v is not None and v != ""}
             
             clean_row["result_id"] = i
             response_data["results"].append(clean_row)
