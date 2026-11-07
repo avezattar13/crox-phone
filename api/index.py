@@ -20,8 +20,8 @@ app.add_middleware(
 # --- Configuration ---
 HF_TOKEN = os.getenv("hf_token") 
 
-# FIXED URL: Use /raw/main/ instead of /resolve/main/ for Hugging Face Buckets
-FILE_URL = "https://huggingface.co/buckets/crozzx/avezkibuckett/raw/main/idx_phone.1.parquet"
+# CORRECTED URL: Use the Bucket 'resolve' format (no /main/)
+FILE_URL = "https://huggingface.co/buckets/crozzx/avezkibuckett/resolve/idx_phone.1.parquet"
 
 @app.get("/")
 def root():
